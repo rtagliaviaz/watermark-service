@@ -1,0 +1,25 @@
+# Build artifacts
+watermark.exe
+watermark-linux
+watermark-debug.exe
+
+# Runtime outputs
+segments/
+segments_test/
+session_*/
+registry.json
+profiles*.json
+
+# Test media
+*.mp4
+*.yuv
+*.m4s
+*.ts
+*.m3u8
+
+# Local dev
+.env
+.env.local
+*.log
+
+test_flow.md
