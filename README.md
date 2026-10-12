@@ -29,6 +29,11 @@ voting scheme. It does not depend on any watermarking library.
 - [Usage](#usage)
   - [Forensic commands](#forensic-commands)
   - [A/B commands](#ab-commands)
+  - [Robustness enhancements](#robustness-enhancements)
+    - [Multi-coefficient embedding](#multi-coefficient-embedding)
+    - [Reed–Solomon FEC](#reedsolomon-fec)
+    - [Verifying the enhancements](#verifying-the-enhancements)
+  - [Minimum video length and segment duration](#minimum-video-length-and-segment-duration)
 - [Performance](#performance)
 - [Design decisions](#design-decisions)
 - [Testing](#testing)
@@ -365,6 +370,157 @@ Example output:
 
 ---
 
+### Robustness enhancements
+
+Two optional mechanisms extend the watermark's tolerance to corruption. They
+are independent and can be combined.
+
+#### Multi-coefficient embedding
+
+When `--multi-coefficient` is passed to `ab-prepare` and `ab-extract`, the
+same bit is embedded at three DCT positions — `(4,4)`, `(3,5)`, and `(5,3)` —
+instead of one. Extraction votes across all three positions per block,
+tripling the number of samples per bit. Robustness improves without any change
+to the required video duration, at the cost of roughly 3× slower embedding and
+extraction.
+
+#### Reed–Solomon FEC
+
+When `--fec-parity N` is passed to `ab-assemble` and `ab-extract`, N bytes of
+Reed–Solomon parity are appended to the framed session hash. The decoder can
+then correct up to N/2 byte errors before the CRC32 check, instead of merely
+detecting them. Recommended value: 16. The cost is a longer payload, so the
+video must be correspondingly longer — see [Minimum video length](#minimum-video-length-and-segment-duration).
+
+#### Verifying the enhancements
+
+The commands below assume:
+- A source video `master.mp4` of any length.
+- A profiles file `profiles_single.json`:
+  ```json
+  [{"name": "720p", "width": 1280, "height": 720}]
+  ```
+- PowerShell (Windows). On Linux/macOS, replace `.\watermark.exe` with
+  `./watermark` and use forward slashes.
+
+**1. Multi-coefficient only**
+
+```powershell
+go build -o watermark.exe ./cmd/watermark
+Remove-Item -Recurse -Force segments_test, session_drm
+
+# Prepare with multi-coefficient
+.\watermark.exe ab-prepare master.mp4 segments_test --profiles profiles_single.json `
+    --hwaccel auto --multi-coefficient
+
+# Assemble (no FEC)
+.\watermark.exe ab-assemble --output session_drm --registry registry.json `
+    segments_test "user_abc_1735000000000_a1b2c3d4"
+
+# Extract (must use multi-coefficient too)
+ffmpeg -y -i session_drm\720p.m3u8 -c copy session.mp4
+.\watermark.exe ab-extract --registry registry.json --multi-coefficient session.mp4
+```
+
+Expected: extraction recovers the original session ID with confidence close
+to 1.00. The session hash and ID are identical to a run without the flag.
+
+**2. FEC only**
+
+FEC requires a longer payload, which in turn requires more segments. If the
+source video is shorter than about 11 minutes, reduce the segment duration to
+1 second so the payload fits.
+
+```powershell
+Remove-Item -Recurse -Force segments_test, session_drm
+
+# Prepare at 1-second segments
+.\watermark.exe ab-prepare master.mp4 segments_test --profiles profiles_single.json `
+    --hwaccel auto --segment-duration 1
+
+# Assemble with FEC parity
+.\watermark.exe ab-assemble --output session_drm --registry registry.json `
+    --segment-duration 1 --fec-parity 16 `
+    segments_test "user_abc_1735000000000_a1b2c3d4"
+
+# Extract with matching segment duration and FEC setting
+ffmpeg -y -i session_drm\720p.m3u8 -c copy session.mp4
+.\watermark.exe ab-extract --registry registry.json `
+    --segment-duration 1 --fec-parity 16 session.mp4
+```
+
+Expected output during assembly:
+
+```
+FEC parity: 16 bytes (corrects up to 8 byte errors)
+```
+
+And during extraction:
+
+```
+✅ Session hash: "zvVwtWvTDCx1_JXS"
+✅ Original session ID: "user_abc_1735000000000_a1b2c3d4"
+```
+
+If the video is too short for the FEC payload even at 1-second segments,
+`ab-assemble` will fail with a message stating the minimum required segment
+count.
+
+**3. Both enhancements together**
+
+```powershell
+Remove-Item -Recurse -Force segments_test, session_drm
+
+.\watermark.exe ab-prepare master.mp4 segments_test --profiles profiles_single.json `
+    --hwaccel auto --multi-coefficient --segment-duration 1
+
+.\watermark.exe ab-assemble --output session_drm --registry registry.json `
+    --segment-duration 1 --fec-parity 16 `
+    segments_test "user_abc_1735000000000_a1b2c3d4"
+
+ffmpeg -y -i session_drm\720p.m3u8 -c copy session.mp4
+
+.\watermark.exe ab-extract --registry registry.json `
+    --segment-duration 1 --multi-coefficient --fec-parity 16 session.mp4
+```
+
+Expected: three positions voting per block, plus Reed–Solomon correction on
+top. This is the most robust configuration available, and also the one with
+the longest minimum video duration.
+
+### Minimum video length and segment duration
+
+The A/B payload must fit entirely within the video's segment count. A single
+payload cycle is 192 bits long (framing + 16-character hash), or 320 bits when
+FEC parity 16 is enabled. The table below lists the minimum video duration for
+each configuration, at different segment durations:
+
+| Configuration | Segment duration | Minimum video length |
+|---|---|---|
+| No FEC | 2.0 s | 6.4 min |
+| No FEC | 1.0 s | 3.2 min |
+| FEC parity = 16 | 2.0 s | 10.7 min |
+| FEC parity = 16 | 1.0 s | 5.3 min |
+
+**Videos shorter than the minimum for their configuration cannot be
+watermarked with A/B mode.** The payload will not fit, and the extractor will
+not be able to reconstruct a valid CRC. For those cases, use the forensic
+mode (`embed` / `extract`), which has no minimum duration and works down to a
+single frame.
+
+To process a shorter video with A/B mode, reduce `--segment-duration` to 1.0
+or 0.5 seconds. This doubles (or quadruples) the number of segments for the
+same content, allowing the payload to fit. The cost is a larger number of
+smaller segment files, slightly worse compression due to more frequent
+keyframes, and — most importantly — **incompatibility with a
+production HLS packager configured for 2-second segments**. Use
+`--segment-duration 1` only when testing the watermarking pipeline in
+isolation; when integrating with a 2-second HLS backend, keep the default
+and apply the duration limits above.
+
+The exact minimum can be computed as `payload_bits × segment_duration`. For
+the default configuration, `192 × 2.0 = 384 seconds`.
+
 ## Performance
 
 All numbers measured on a machine with an 8-core CPU and an RTX-class GPU,
@@ -487,21 +643,6 @@ Packager produces — production players (hls.js, Shaka Player) can, but the
 inability to validate the pipeline end-to-end with ffmpeg made the integration
 impractical to ship. This is a known ffmpeg limitation, not a limitation of the
 watermarking scheme itself.
-
-### Robustness envelope
-
-The forensic mode is designed for **realistic content** (interviews,
-presentations, screen recordings). It is not designed to survive adversarial
-patterns such as `testsrc2`, where the natural DCT coefficient at (4,4) is
-large enough to swamp the watermark. This is a known and documented limit of
-the current single-coefficient sign-modulation scheme.
-
-Improvements that would extend robustness:
-
-- Reed–Solomon or Hamming FEC over the payload, to tolerate bit errors instead
-  of merely detecting them.
-- Multi-coefficient embedding (e.g., (4,4) plus (3,5) plus (5,3)) with per-block
-  majority voting.
 
 ### Geometric attacks
 

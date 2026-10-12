@@ -20,6 +20,12 @@ func runABExtract(args []string) {
 	delta := fs.Float64("delta", 25.0, "DCT coefficient strength")
 	u := fs.Int("u", 4, "Coefficient U position")
 	v := fs.Int("v", 4, "Coefficient V position")
+	multiCoeff := fs.Bool("multi-coefficient", false,
+		"Vote across (4,4), (3,5), and (5,3) in each block. "+
+			"Must match the value used at ab-prepare time.")
+	fecParity := fs.Int("fec-parity", 0,
+		"Bytes of Reed-Solomon parity that was used at ab-assemble time. "+
+			"When > 0, decoding can correct up to fec-parity/2 byte errors.")
 	registryPath := fs.String("registry", "", "Optional registry file")
 	fs.Parse(args)
 
@@ -36,13 +42,23 @@ func runABExtract(args []string) {
 	}
 
 	cfg := types.WatermarkConfig{
-		CoefficientU: *u,
-		CoefficientV: *v,
-		Delta:        *delta,
-		Redundancy:   8,
+		Delta:      *delta,
+		Redundancy: 8,
+	}
+	if *multiCoeff {
+		cfg.Positions = types.MultiCoefficientPositions
+	} else {
+		cfg.CoefficientU = *u
+		cfg.CoefficientV = *v
 	}
 
 	fmt.Printf("🔍 Extracting session from: %s\n", inputPath)
+	if *multiCoeff {
+		fmt.Println("🔀 Voting across (4,4), (3,5), (5,3)")
+	}
+	if *fecParity > 0 {
+		fmt.Printf("🛡  FEC parity: %d bytes\n", *fecParity)
+	}
 
 	start := time.Now()
 
@@ -80,7 +96,6 @@ func runABExtract(args []string) {
 
 	for segIdx := 0; segIdx < numSegments; segIdx++ {
 		acc := watermark.NewSegmentAccumulator(cfg)
-
 		framesInSegment := 0
 		for framesInSegment < framesPerSegment {
 			frame, err := reader.ReadFrame()
@@ -120,7 +135,7 @@ func runABExtract(args []string) {
 		os.Exit(1)
 	}
 
-	hash, err := session.Decode(allBits)
+	hash, err := session.DecodeWithParity(allBits, *fecParity)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Extraction failed: %v\n", err)
 		os.Exit(1)

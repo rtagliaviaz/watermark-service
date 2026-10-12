@@ -21,6 +21,10 @@ func runABAssemble(args []string) {
 		"Segment duration in seconds (must match ab-prepare)")
 	registryPath := fs.String("registry", "",
 		"Optional registry file to store hash->id mapping")
+	fecParity := fs.Int("fec-parity", 0,
+		"Bytes of Reed-Solomon parity to append to the framed session hash. "+
+			"When > 0, extraction can correct up to fec-parity/2 byte errors. "+
+			"Recommended: 16. Must match the value passed to ab-extract.")
 	fs.Parse(args)
 
 	rest := fs.Args()
@@ -43,7 +47,6 @@ func runABAssemble(args []string) {
 	}
 	if len(profiles) == 0 {
 		fmt.Fprintf(os.Stderr, "no quality profiles found in %s\n", segmentsDir)
-		fmt.Fprintln(os.Stderr, "expected <segments-dir>/<quality>/{A,B}/*.m4s")
 		os.Exit(1)
 	}
 
@@ -58,10 +61,30 @@ func runABAssemble(args []string) {
 	}
 	numSegments := len(refIndices)
 
-	bits, err := session.BitsForSession(sessionID, numSegments)
+	bits, err := session.BitsForSessionWithParity(sessionID, numSegments, *fecParity)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "computing session bits: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Sanity check: warn if the video is too short for a full payload cycle.
+	minNeeded := 0
+	{
+		hash := session.HashID(sessionID)
+		// Reuse the codec to compute the actual bit length.
+		payloadBits := len(hash) + 8 // length prefix + payload + CRC, minus FEC estimate
+		// This is a heuristic; the true required length is computed inside the codec.
+		// We use a rough bound for the warning.
+		minNeeded = payloadBits * 2
+		if *fecParity > 0 {
+			minNeeded = minNeeded * 2
+		}
+	}
+	if numSegments < minNeeded {
+		fmt.Fprintf(os.Stderr,
+			"⚠  %d segments may be too few for reliable decoding. "+
+				"With FEC parity=%d, longer videos are recommended.\n",
+			numSegments, *fecParity)
 	}
 
 	if *registryPath != "" {
@@ -133,22 +156,16 @@ func runABAssemble(args []string) {
 
 	masterPath := filepath.Join(*outputDir, "master.m3u8")
 	var msb strings.Builder
-	msb.WriteString("#EXTM3U\n")
-	msb.WriteString("#EXT-X-VERSION:7\n")
-	msb.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n")
-	msb.WriteString("\n")
-
+	msb.WriteString("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n\n")
 	for _, p := range profiles {
 		bw := estimateBandwidth(absSeg, p.name, numSegments, *segmentDuration)
-		codec := avcCodecString(p.height)
 		fmt.Fprintf(&msb,
 			"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s\"\n",
-			bw, p.width, p.height, codec)
+			bw, p.width, p.height, avcCodecString(p.height))
 		fmt.Fprintf(&msb, "%s.m3u8\n\n", p.name)
 	}
-
 	if err := os.WriteFile(masterPath, []byte(msb.String()), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "writing %s: %v\n", masterPath, err)
+		fmt.Fprintf(os.Stderr, "writing master: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -165,11 +182,12 @@ func runABAssemble(args []string) {
 	fmt.Printf("📂 Segments:   %d × %d profiles (from %s)\n",
 		numSegments, len(profiles), segmentsDir)
 	fmt.Printf("🔢 Bits:       %d ones, %d zeros\n", ones, zeros)
+	if *fecParity > 0 {
+		fmt.Printf("🛡  FEC parity: %d bytes (corrects up to %d byte errors)\n",
+			*fecParity, *fecParity/2)
+	}
 	fmt.Printf("📄 Output dir: %s\n", *outputDir)
 	fmt.Printf("   master:     %s\n", masterPath)
-	for _, p := range profiles {
-		fmt.Printf("   %-10s %s.m3u8 (%dx%d)\n", p.name, p.name, p.width, p.height)
-	}
 
 	if *registryPath != "" {
 		reg, _ := session.OpenRegistry(*registryPath)
@@ -189,7 +207,6 @@ func discoverProfiles(segmentsDir string) ([]profileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	var profiles []profileInfo
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -211,25 +228,18 @@ func discoverProfiles(segmentsDir string) ([]profileInfo, error) {
 			return nil, fmt.Errorf("profile %s: A has %d segments, B has %d",
 				name, len(indicesA), len(indicesB))
 		}
-
 		initA := filepath.Join(dirA, "init.mp4")
 		if _, err := os.Stat(initA); err != nil {
 			return nil, fmt.Errorf("profile %s: missing %s", name, initA)
 		}
-
 		w, h := parseResolutionFromName(name)
 		profiles = append(profiles, profileInfo{
-			name:    name,
-			width:   w,
-			height:  h,
-			indices: indicesA,
+			name: name, width: w, height: h, indices: indicesA,
 		})
 	}
-
 	sort.Slice(profiles, func(i, j int) bool {
 		return profiles[i].height > profiles[j].height
 	})
-
 	return profiles, nil
 }
 

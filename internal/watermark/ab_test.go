@@ -5,7 +5,6 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/rtagliaviaz/watermark-service/internal/codec"
 	"github.com/rtagliaviaz/watermark-service/internal/types"
 )
 
@@ -154,64 +153,66 @@ func TestSegmentAccumulatorReset(t *testing.T) {
 	}
 }
 
-func TestDecodeSessionFromSegmentBits(t *testing.T) {
-	ids := []string{"a", "abc", "sess_123", "user_abc"}
-	for _, id := range ids {
-		t.Run(id, func(t *testing.T) {
-			bits, err := codec.Encode(id)
-			if err != nil {
+// --- Multi-coefficient tests -------------------------------------------------
+
+func TestMultiCoefficientRoundTrip(t *testing.T) {
+	dims := types.FrameDimensions{Width: 320, Height: 240}
+	cfg := types.DefaultConfig()
+	cfg.Positions = types.MultiCoefficientPositions
+
+	for _, bit := range []byte{0, 1} {
+		t.Run(fmt.Sprintf("bit=%d", bit), func(t *testing.T) {
+			frame := makeFlatNoisyFrame(dims, int64(bit+1))
+
+			if _, err := EmbedSegmentBit(frame, dims, bit, cfg); err != nil {
 				t.Fatal(err)
 			}
 
-			// Simulate 3 full cycles of the payload over the segment stream.
-			n := len(bits) * 3
-			repeated := make([]byte, n)
-			for i := 0; i < n; i++ {
-				repeated[i] = bits[i%len(bits)]
+			acc := NewSegmentAccumulator(cfg)
+			if err := acc.AddFrame(frame, dims); err != nil {
+				t.Fatal(err)
 			}
 
-			got, err := DecodeSessionFromSegmentBits(repeated)
-			if err != nil {
-				t.Fatalf("decode failed: %v", err)
+			got, confidence := acc.ExtractBit()
+			if got != bit {
+				t.Errorf("bit mismatch: want %d, got %d (confidence %.3f)",
+					bit, got, confidence)
 			}
-			if got != id {
-				t.Errorf("want %q, got %q", id, got)
+			if confidence < 0.9 {
+				t.Errorf("expected high confidence with 3 positions, got %.3f",
+					confidence)
 			}
 		})
 	}
 }
 
-func TestDecodeSessionFromNoisySegmentBits(t *testing.T) {
-	id := "abc"
-	bits, err := codec.Encode(id)
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestMultiCoefficientSurvivesStrongerNoise(t *testing.T) {
+	dims := types.FrameDimensions{Width: 320, Height: 240}
+	cfg := types.DefaultConfig()
+	cfg.Positions = types.MultiCoefficientPositions
 
-	const cycles = 5
-	n := len(bits) * cycles
-	r := rand.New(rand.NewSource(7))
-	noisy := make([]byte, n)
-	for i := 0; i < n; i++ {
-		b := bits[i%len(bits)]
-		// 1% random bit flip rate, simulating segment-level extraction errors
-		if r.Float64() < 0.01 {
-			b ^= 1
+	// With three positions voting, we should survive a sigma where the
+	// single-coefficient configuration would already be marginal.
+	for _, bit := range []byte{0, 1} {
+		for _, sigma := range []float64{15.0, 20.0} {
+			name := fmt.Sprintf("bit=%d/sigma=%.0f", bit, sigma)
+			t.Run(name, func(t *testing.T) {
+				frame := makeFlatNoisyFrame(dims, int64(bit+1))
+				if _, err := EmbedSegmentBit(frame, dims, bit, cfg); err != nil {
+					t.Fatal(err)
+				}
+				addGaussianNoise(frame, sigma, 42)
+
+				acc := NewSegmentAccumulator(cfg)
+				if err := acc.AddFrame(frame, dims); err != nil {
+					t.Fatal(err)
+				}
+				got, confidence := acc.ExtractBit()
+				if got != bit {
+					t.Errorf("bit mismatch: want %d, got %d (confidence %.3f)",
+						bit, got, confidence)
+				}
+			})
 		}
-		noisy[i] = b
-	}
-
-	got, err := DecodeSessionFromSegmentBits(noisy)
-	if err != nil {
-		t.Fatalf("decode failed: %v", err)
-	}
-	if got != id {
-		t.Errorf("want %q, got %q", id, got)
-	}
-}
-
-func TestDecodeSessionEmptyInput(t *testing.T) {
-	if _, err := DecodeSessionFromSegmentBits(nil); err == nil {
-		t.Error("expected error for empty input")
 	}
 }

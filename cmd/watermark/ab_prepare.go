@@ -33,9 +33,12 @@ func runABPrepare(args []string) {
 	delta := fs.Float64("delta", 25.0, "DCT coefficient strength")
 	u := fs.Int("u", 4, "Coefficient U position (0-7)")
 	v := fs.Int("v", 4, "Coefficient V position (0-7)")
+	multiCoeff := fs.Bool("multi-coefficient", false,
+		"Embed the same bit at (4,4), (3,5), and (5,3) in each block. "+
+			"Increases robustness at the cost of slightly more visual impact. "+
+			"When enabled, --u and --v are ignored.")
 	profilesPath := fs.String("profiles", "",
-		"Path to a JSON file with quality profiles. If empty, a single profile "+
-			"matching the input resolution is used.")
+		"Path to a JSON file with quality profiles.")
 	hwaccelFlag := fs.String("hwaccel", "none",
 		"Hardware acceleration: none, auto, nvenc, qsv, amf, vaapi, videotoolbox")
 	keepMasters := fs.Bool("keep-masters", false,
@@ -61,8 +64,6 @@ func runABPrepare(args []string) {
 	requestedAccel := ffmpeg.ParseHWAccel(*hwaccelFlag)
 	if requestedAccel == "" {
 		fmt.Fprintf(os.Stderr, "invalid --hwaccel value %q\n", *hwaccelFlag)
-		fmt.Fprintln(os.Stderr,
-			"valid values: none, auto, nvenc, qsv, amf, vaapi, videotoolbox")
 		os.Exit(1)
 	}
 	resolvedAccel := ffmpeg.ResolveHWAccel(requestedAccel)
@@ -77,17 +78,23 @@ func runABPrepare(args []string) {
 		fmt.Printf("⚙  HW accel: %s\n", resolvedAccel)
 	}
 
+	cfg := types.WatermarkConfig{
+		Delta:      *delta,
+		Redundancy: 8,
+	}
+	if *multiCoeff {
+		cfg.Positions = types.MultiCoefficientPositions
+		fmt.Println("🔀 Coefficients: multi (4,4), (3,5), (5,3)")
+	} else {
+		cfg.CoefficientU = *u
+		cfg.CoefficientV = *v
+		fmt.Printf("🔀 Coefficient:  (%d,%d)\n", *u, *v)
+	}
+
 	profiles, err := loadProfiles(*profilesPath, inputPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "loading profiles: %v\n", err)
 		os.Exit(1)
-	}
-
-	cfg := types.WatermarkConfig{
-		CoefficientU: *u,
-		CoefficientV: *v,
-		Delta:        *delta,
-		Redundancy:   8,
 	}
 
 	start := time.Now()
@@ -207,8 +214,6 @@ func runABPrepare(args []string) {
 			fmt.Fprintf(os.Stderr,
 				"❌ segment count mismatch across profiles: %s has %d, %s has %d\n",
 				results[0].name, refCount, r.name, r.segmentsA)
-			fmt.Fprintln(os.Stderr,
-				"   All renditions of the same video must produce the same number of segments.")
 			os.Exit(1)
 		}
 	}

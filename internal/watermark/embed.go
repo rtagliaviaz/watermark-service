@@ -24,10 +24,7 @@ type EmbedResult struct {
 }
 
 // Embed encodes the ID as bits and writes them into the Y plane of the frame
-// using DCT on non-overlapping 8x8 blocks.
-//
-// This is the sequential forensic path, kept for compatibility with the
-// existing tests and the `embed` CLI command.
+// using DCT on non-overlapping 8x8 blocks. Sequential forensic path.
 func Embed(frame *types.YUVFrame, dims types.FrameDimensions, opts EmbedOptions) (*EmbedResult, error) {
 	bits, err := codec.Encode(opts.ID)
 	if err != nil {
@@ -87,12 +84,7 @@ func EmbedBatch(frames []*types.YUVFrame, dims types.FrameDimensions, opts Embed
 }
 
 // EmbedSegmentBit embeds a single bit (0 or 1) into every 8x8 block of the
-// Y plane. This is the building block of A/B watermarking.
-//
-// The work is parallelized across CPU cores. The block grid is split into
-// horizontal bands, and each band is processed by an independent goroutine.
-// Because the bands occupy disjoint rows of the Y plane, no synchronization
-// is needed beyond the WaitGroup — there is no shared mutable state.
+// Y plane. The work is parallelized across CPU cores.
 func EmbedSegmentBit(
 	frame *types.YUVFrame,
 	dims types.FrameDimensions,
@@ -112,9 +104,6 @@ func EmbedSegmentBit(
 		return 0, nil
 	}
 
-	// Choose a worker count. Use all logical CPUs but never more workers
-	// than there are block rows, otherwise some goroutines would have no
-	// work and their spawn cost would be pure overhead.
 	workers := runtime.NumCPU()
 	if workers > blocksPerCol {
 		workers = blocksPerCol
@@ -122,7 +111,6 @@ func EmbedSegmentBit(
 	if workers < 1 {
 		workers = 1
 	}
-
 	rowsPerWorker := (blocksPerCol + workers - 1) / workers
 
 	var wg sync.WaitGroup
@@ -146,7 +134,6 @@ func EmbedSegmentBit(
 			}
 		}(startRow, endRow)
 	}
-
 	wg.Wait()
 	return blocksPerRow * blocksPerCol, nil
 }
@@ -161,7 +148,6 @@ func embedBits(frame *types.YUVFrame, dims types.FrameDimensions, bits []byte, c
 	if blocksPerRow == 0 || blocksPerCol == 0 {
 		return 0, nil
 	}
-
 	bitIndex := 0
 	blocksWritten := 0
 	for by := 0; by < blocksPerCol; by++ {
@@ -175,13 +161,10 @@ func embedBits(frame *types.YUVFrame, dims types.FrameDimensions, bits []byte, c
 }
 
 // embedOneBlock extracts the 8x8 block at (bx, by), applies the DCT, embeds
-// one bit in the coefficient at (CoefficientU, CoefficientV), applies the
-// inverse DCT, and writes the result back to the Y plane. This is the inner
-// kernel called millions of times per video.
+// one bit at each configured coefficient position, applies the inverse DCT,
+// and writes the result back to the Y plane.
 //
-// The function is pure: it reads and writes only the memory of the block
-// at (bx, by), so calling it concurrently for different (bx, by) pairs is
-// safe.
+// The function is safe to call concurrently for different (bx, by) pairs.
 func embedOneBlock(
 	frame *types.YUVFrame,
 	dims types.FrameDimensions,
@@ -192,8 +175,6 @@ func embedOneBlock(
 	var block dct.Block8x8
 	baseX := bx * 8
 	baseY := by * 8
-
-	// Load the 8x8 block from the Y plane.
 	for y := 0; y < 8; y++ {
 		row := (baseY + y) * dims.Width
 		for x := 0; x < 8; x++ {
@@ -203,23 +184,23 @@ func embedOneBlock(
 
 	coeffs := dct.Forward(block)
 
-	u, v := cfg.CoefficientU, cfg.CoefficientV
-	c := coeffs[u][v]
-	if bit == 1 {
-		if c < 0 {
-			c = -c
+	for _, pos := range cfg.EffectivePositions() {
+		c := coeffs[pos.U][pos.V]
+		if bit == 1 {
+			if c < 0 {
+				c = -c
+			}
+			coeffs[pos.U][pos.V] = c + cfg.Delta
+		} else {
+			if c > 0 {
+				c = -c
+			}
+			coeffs[pos.U][pos.V] = c - cfg.Delta
 		}
-		coeffs[u][v] = c + cfg.Delta
-	} else {
-		if c > 0 {
-			c = -c
-		}
-		coeffs[u][v] = c - cfg.Delta
 	}
 
 	reconstructed := dct.Inverse(coeffs)
 
-	// Write the modified block back, clamping to [0, 255].
 	for y := 0; y < 8; y++ {
 		row := (baseY + y) * dims.Width
 		for x := 0; x < 8; x++ {
