@@ -18,7 +18,6 @@ streams for two distinct purposes:
 The tool implements its own 2D DCT, CRC32-framed ID codec, and multi-frame
 voting scheme. It does not depend on any watermarking library.
 
----
 
 ## Table of contents
 
@@ -40,7 +39,6 @@ voting scheme. It does not depend on any watermarking library.
 - [Limitations and future work](#limitations-and-future-work)
 - [License](#license)
 
----
 
 ## How it works
 
@@ -90,8 +88,6 @@ rowsPerWorker := (blocksPerCol + workers - 1) / workers
 The speedup is roughly linear in the number of cores, with no locks because
 each goroutine writes to a disjoint region of the luma plane.
 
----
-
 ## Forensic watermarking
 
 The forensic mode embeds a **complete ID** into every frame, cycling through
@@ -121,7 +117,6 @@ therefore embedded **~13 times per frame**. Aggregating votes over 10 frames
 gives roughly 130 samples per bit, which is what allows the majority vote to
 absorb the noise introduced by recompression.
 
----
 
 ## A/B watermarking
 
@@ -159,7 +154,6 @@ The mapping `hash → original ID` is stored in a registry (JSON file). After
 extraction, the operator looks up the hash to recover the human-readable
 session ID.
 
----
 
 ### Diagram
 
@@ -211,7 +205,6 @@ On Windows:
 go build -o watermark.exe ./cmd/watermark
 ```
 
----
 
 ## Usage
 
@@ -368,7 +361,6 @@ Example output:
    Bits collected: 210 segments in 44.3s
 ```
 
----
 
 ### Robustness enhancements
 
@@ -543,7 +535,6 @@ The parallel DCT splits the block grid into horizontal bands and processes
 each band in a separate goroutine. Because blocks are independent, no
 synchronization is required in the hot loop.
 
----
 
 ## Design decisions
 
@@ -598,7 +589,6 @@ codec. The tool's job is to process decoded frames, not to reimplement H.264.
 The pipe-based architecture (`ffmpeg → raw YUV → Go → raw YUV → ffmpeg`) keeps
 the service codec-agnostic.
 
----
 
 ## Testing
 
@@ -629,9 +619,8 @@ Skip the slow tests:
 go test -tags=e2e -short ./cmd/watermark/...
 ```
 
----
 
-## Limitations and future work
+## Limitations
 
 ### DRM integration
 
@@ -650,7 +639,6 @@ The watermark does not survive cropping, rotation, or resolution changes that
 break the alignment of the 8×8 block grid. Content-aware synchronization
 patterns would be required to handle these.
 
----
 
 ## License
 
